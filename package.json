@@ -22,6 +22,14 @@
     "observability",
     "deepseek-harness"
   ],
+  "author": "AndyLaw258",
   "license": "MIT",
-  "private": true
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AndyLaw258/ctxgc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AndyLaw258/ctxgc/issues"
+  },
+  "homepage": "https://github.com/AndyLaw258/ctxgc#readme"
 }
