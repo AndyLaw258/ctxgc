@@ -1,0 +1,27 @@
+{
+  "name": "ctxgc",
+  "version": "0.1.0",
+  "description": "Context Garbage Collector — 审计 AI Agent 的上下文成本：找出进入上下文后再未被引用的内容，量化其随轮数放大的真实开销",
+  "type": "module",
+  "bin": {
+    "ctxgc": "bin/ctxgc.js"
+  },
+  "main": "lib/index.js",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "keywords": [
+    "ai-agent",
+    "llm",
+    "context",
+    "token",
+    "cost",
+    "observability",
+    "deepseek-harness"
+  ],
+  "license": "MIT",
+  "private": true
+}
