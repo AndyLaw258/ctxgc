@@ -24,9 +24,18 @@ import {
   simulateSession,
   inspectWorkflow,
   scaffoldWorkspace,
+  inspectPrompt,
+  promptAdvice,
+  analyzeIR,
+  dshAdapter,
+  dshToIR,
+  genericAdapter,
+  inspectHealth,
+  GENERIC_SESSION_DIR,
   renderSessionReport,
   renderSimulation,
   renderWorkflow,
+  renderPrompt,
   renderOverview,
   formatTokens,
 } from '../lib/index.js';
@@ -41,16 +50,20 @@ ctxgc —— Context Garbage Collector
   ctxgc                    审计最近一个会话
   ctxgc simulate           反事实模拟：工具结果句柄化能省多少
   ctxgc workflow           工作流体检：记忆外置这套方法做得怎么样
+  ctxgc prompt             常驻成本审计：工具定义 / 系统提示 / AGENTS.md 每轮烧掉多少
   ctxgc init [路径]        生成记忆外置工作区骨架（不覆盖已有文件）
   ctxgc list               列出所有会话
   ctxgc all                全部会话总览
   ctxgc report <id前缀>    审计指定会话
+  ctxgc --runtime generic --sessions <dir>   审计任意运行时的标准 JSON 会话（v1.0）
 
 选项：
   --top <n>       排行榜长度（默认 15）
   --digest <n>    摘要形态假设的单条体积（默认 300）
   --sweep         敏感性分析扫描更多取值
   --root <path>   指定工作区根目录（workflow / init 用）
+  --runtime <name> 运行时：dsh（默认）| generic（标准 JSON 会话文件）
+  --sessions <dir> generic 的会话目录（缺省 ~/.ctxgc/sessions）
   --dry-run       init 只预览，不落盘
   --json          输出 JSON
   --home <path>   指定 DSH_HOME（默认取 $DSH_HOME 或 ~/.dsh）
@@ -74,6 +87,10 @@ export function parseArgs(argv) {
     dryRun: false,
     json: false,
     home: undefined,
+    /** `dsh`（默认）或 `generic`（标准 JSON 会话文件）。 */
+    runtime: 'dsh',
+    /** generic 运行时的会话目录；缺省用 GENERIC_SESSION_DIR。 */
+    sessionsDir: undefined,
     help: false,
   };
 
@@ -88,12 +105,14 @@ export function parseArgs(argv) {
     else if (arg === '--digest') { i += 1; options.digestTokens = Number(argv[i]) || 300; }
     else if (arg === '--root') { i += 1; options.root = argv[i]; }
     else if (arg === '--home') { i += 1; options.home = argv[i]; }
+    else if (arg === '--runtime') { i += 1; options.runtime = argv[i]; }
+    else if (arg === '--sessions') { i += 1; options.sessionsDir = argv[i]; }
     else positional.push(arg);
   }
 
   if (positional.length > 0) {
     const [first, second] = positional;
-    if (['list', 'all', 'report', 'simulate', 'workflow', 'init'].includes(first)) {
+    if (['list', 'all', 'report', 'simulate', 'workflow', 'prompt', 'init'].includes(first)) {
       options.command = first;
       options.target = second ?? null;
     } else {
@@ -151,19 +170,38 @@ function main() {
     return;
   }
 
-  const home = resolveDshHome(options.home);
-  const sessions = listSessions({ dshHome: home });
-
-  if (sessions.length === 0) {
-    console.error(`ctxgc: 在 ${home}\\sessions 下没有找到任何会话`);
+  // 运行时选择：dsh（默认）或 generic。两条路共用同一套成本模型、归因与报告 ——
+  // 差别只在「谁把日志翻译成 IR」。
+  const runtime = options.runtime ?? 'dsh';
+  if (runtime !== 'dsh' && runtime !== 'generic') {
+    console.error(`ctxgc: 未知运行时 "${runtime}"，可选 dsh | generic`);
     process.exitCode = 1;
     return;
   }
 
-  const analyze = (session) => analyzeSession(session, {
-    top: options.top,
-    digestTokens: options.digestTokens,
-  });
+  const home = resolveDshHome(options.home);
+  const sessionsDir = options.sessionsDir ?? GENERIC_SESSION_DIR;
+  const sessions = runtime === 'generic'
+    ? genericAdapter.list({ sessionsDir })
+    : dshAdapter.list({ dshHome: home });
+
+  if (sessions.length === 0) {
+    console.error(runtime === 'generic'
+      ? `ctxgc: 在 ${sessionsDir} 下没有找到 *.json 会话文件`
+      : `ctxgc: 在 ${home}\\sessions 下没有找到任何会话`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // 分析时顺便留一份 IR 与自检结果：格式升级导致的**静默少算**必须能被报出来，
+  // 否则报告会给出一个偏低的、却看起来完全正常的数字。
+  const analyze = (handle) => {
+    const ir = runtime === 'generic' ? genericAdapter.load(handle) : dshToIR(handle);
+    const analysis = runtime === 'generic'
+      ? analyzeIR(ir, { top: options.top, digestTokens: options.digestTokens })
+      : analyzeSession(handle, { top: options.top, digestTokens: options.digestTokens });
+    return { ...analysis, ir, health: inspectHealth(ir, analysis) };
+  };
 
   if (options.command === 'list') {
     if (options.json) {
@@ -171,11 +209,13 @@ function main() {
       return;
     }
     console.log('');
-    console.log(`  ctxgc · 会话清单（${home}）`);
+    console.log(`  ctxgc · 会话清单（${runtime === 'generic' ? sessionsDir : home}）`);
     console.log(`  ${'─'.repeat(76)}`);
     for (const session of sessions) {
       console.log(`  ${session.id}`);
-      console.log(`    ${session.project}   ${(session.bytes / 1024).toFixed(0)} KB   ${session.modifiedAt.toLocaleString('zh-CN')}`);
+      console.log(`    ${runtime === 'generic'
+        ? `${session.path}   ${new Date(session.mtime).toLocaleString('zh-CN')}`
+        : `${session.project}   ${(session.bytes / 1024).toFixed(0)} KB   ${session.modifiedAt.toLocaleString('zh-CN')}`}`);
     }
     console.log('');
     return;
@@ -232,6 +272,33 @@ function main() {
     return;
   }
 
+  if (options.command === 'prompt') {
+    const ptTarget = options.target ? pickSession(sessions, options.target) : sessions[0];
+    const ptAnalysis = ptTarget ? analyze(ptTarget) : null;
+    const root = options.root || (ptAnalysis && ptAnalysis.session.cwd) || process.cwd();
+    const dshHome = options.home || resolveDshHome();
+    const result = inspectPrompt(ptAnalysis, { root, dshHome });
+    const advice = promptAdvice(result);
+
+    if (options.json) {
+      console.log(JSON.stringify({
+        root,
+        turns: result.turns,
+        perTurn: result.perTurn,
+        total: result.total,
+        visibleFromLog: result.visibleFromLog,
+        parts: result.parts,
+        tools: result.tools.items,
+        agents: result.agents.items,
+        advice,
+      }, null, 2));
+      return;
+    }
+
+    console.log(renderPrompt(ptAnalysis ? ptAnalysis.session : null, result, advice));
+    return;
+  }
+
   if (options.command === 'workflow') {
     const wfTarget = options.target ? pickSession(sessions, options.target) : sessions[0];
     const wfAnalysis = wfTarget ? analyze(wfTarget) : null;
@@ -245,6 +312,8 @@ function main() {
         slots: result.workspace.slots,
         habits: {
           restatementRatio: result.habits.restatementRatio,
+          userMessages: result.habits.userMessages,
+          userTokensPerMessage: result.habits.userTokensPerMessage,
           startupCost: result.habits.startupCost,
           repeatCount: result.habits.repeatCount,
           repeatShare: result.habits.repeatShare,

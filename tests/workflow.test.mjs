@@ -115,13 +115,36 @@ test('analyzeHabits：重复获取只统计同指纹的读取类条目', () => {
   assert.equal(habits.repeatCount, 1, '多出来的那一次才算重复');
 });
 
-test('analyzeHabits：背景重述成本 = 用户消息 ÷ 总量', () => {
+test('analyzeHabits：占比仍按「用户消息 ÷ 总量」算（降级为参考项）', () => {
   const analysis = analysisWith([
     item({ kind: 'user', tokens: 500, lifecycleTokens: 500 }),
     item({ kind: 'assistant', tokens: 500, lifecycleTokens: 500 }),
   ]);
   const habits = analyzeHabits(analysis);
   assert.equal(habits.restatementRatio, 0.5);
+});
+
+test('analyzeHabits：每条用户消息的平均体积 —— 不随会话变长而稀释', () => {
+  // 修掉「占比被稀释」之后，判定改用平均值。构造两个只有助手输出不同的会话：
+  // 用户消息完全一样，后一个的助手输出多得多。
+  const userItem = item({ kind: 'user', tokens: 400, lifecycleTokens: 400 });
+  const short = analyzeHabits(
+    analysisWith([userItem, item({ kind: 'assistant', tokens: 200, lifecycleTokens: 200 })])
+  );
+  const long = analyzeHabits(
+    analysisWith([
+      userItem,
+      item({ kind: 'assistant', tokens: 200, lifecycleTokens: 200 }),
+      item({ kind: 'assistant', tokens: 5000, lifecycleTokens: 5000 }),
+      item({ kind: 'assistant', tokens: 9000, lifecycleTokens: 9000 }),
+    ])
+  );
+  // 占比确实被助手输出稀释 —— 同一会话实测从 9.0% 掉到 2.0% 就是这个原因
+  assert.ok(long.restatementRatio < short.restatementRatio, '占比应随会话变长而下降');
+  // 平均值纹丝不动，所以它才是可用的趋势指标
+  assert.equal(short.userTokensPerMessage, 400);
+  assert.equal(long.userTokensPerMessage, 400);
+  assert.equal(long.userMessages, 1);
 });
 
 test('analyzeHabits：上下文启动成本取第一次调用', () => {
@@ -155,6 +178,23 @@ test('inspectWorkspace：四要素齐全得满分', () => {
     assert.equal(result.missingRequired.length, 0);
     const memory = result.slots.find((s) => s.key === 'memory');
     assert.equal(memory.fileCount, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('inspectWorkspace：产出归档要递归统计子目录（约定本就是一层文件夹）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ctxgc-'));
+  try {
+    // 约定是 sessions/<日期-任务名>/，产出天然躺在子目录里 ——
+    // 只数顶层会把它们全部漏掉：实测曾把 5 个文件、28 KB 报成「1 个文件，0.0 KB」，
+    // 而且还显示 ✅ 达标，体检结论因此完全失真。
+    mkdirSync(join(dir, 'sessions', '2026-09-21-some-task'), { recursive: true });
+    writeFileSync(join(dir, 'sessions', '.gitkeep'), '');
+    writeFileSync(join(dir, 'sessions', '2026-09-21-some-task', 'README.md'), 'x'.repeat(120));
+    const sessions = inspectWorkspace(dir).slots.find((s) => s.label === '产出归档');
+    assert.equal(sessions.fileCount, 2, '顶层与子目录里的文件都要数到');
+    assert.ok(sessions.bytes >= 120, `子目录里的体积不能被漏掉，实际 ${sessions.bytes}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -200,13 +240,26 @@ test('recommendations：缺必需项时给出高优先级建议', () => {
   }
 });
 
-test('recommendations：背景重述偏高时告警', () => {
+test('recommendations：用户消息平均偏长才告警，占比高不算', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ctxgc-'));
   try {
-    const advice = recommendations(inspectWorkspace(dir), {
-      repeatCount: 0, repeatShare: 0, restatementRatio: 0.2, startupCost: 1000,
+    // 占比高、但每条都很短 → 不该告警（旧逻辑会在这里误报）
+    const quiet = recommendations(inspectWorkspace(dir), {
+      repeatCount: 0, repeatShare: 0, restatementRatio: 0.3,
+      userMessages: 20, userTokensPerMessage: 40, startupCost: 1000,
     });
-    assert.ok(advice.some((a) => a.text.includes('背景重述')));
+    assert.equal(
+      quiet.some((a) => a.text.includes('背景重述')),
+      false,
+      '占比高不等于在反复交代背景 —— 那只是助手输出少'
+    );
+
+    // 每条都很长 → 必须告警
+    const chatty = recommendations(inspectWorkspace(dir), {
+      repeatCount: 0, repeatShare: 0, restatementRatio: 0.01,
+      userMessages: 20, userTokensPerMessage: 900, startupCost: 1000,
+    });
+    assert.ok(chatty.some((a) => a.text.includes('背景重述')));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
